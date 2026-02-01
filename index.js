@@ -1,134 +1,147 @@
-const express = require("express");
-const multer = require("multer");
-const ExcelJS = require("exceljs");
+import express from "express";
+import cors from "cors";
+import multer from "multer";
+import ExcelJS from "exceljs";
 
 const app = express();
+app.use(cors());
 
-// Multer: Uploads im Speicher (keine Disk)
+// Multer: multipart/form-data robust in memory
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  limits: {
+    fileSize: 25 * 1024 * 1024, // 25MB
+  },
 });
 
-// Healthcheck
+// Health
 app.get("/", (req, res) => {
-  res.status(200).send("OK - excel-fill-service is running");
+  res.status(200).send("OK excel fill service running");
 });
 
-/**
- * Erwartet multipart/form-data:
- * - file: XLSX (Binary)  -> Pflicht
- * - payload: JSON als Textfeld ODER als Datei (Binary) -> Pflicht
- *
- * payload JSON Beispiel:
- * {
- *   "sheetName": "Tabelle1",
- *   "cells": { "F5": "A26101", "B5": "Max Mustermann", "B6": "Musterstraße 1", "B7": "Projekt XY" },
- *   "positionStartRow": 15,
- *   "positions": [
- *     { "pos": 1, "title": "Spiegel", "desc": "Antikspiegel", "qty": "2 Stk", "dim": "69x90" }
- *   ],
- *   "columns": { "pos": "A", "title": "B", "desc": "C", "qty": "D", "dim": "E" }
- * }
- */
-app.post(
-  "/fill",
-  upload.fields([
-    { name: "file", maxCount: 1 },
-    { name: "payload", maxCount: 1 },
-  ]),
-  async (req, res) => {
+// Wichtig:
+// - akzeptiert Datei unter "template" ODER "file"
+// - akzeptiert payload als Textfeld ODER als Datei "payload"
+const multipartHandler = upload.fields([
+  { name: "template", maxCount: 1 },
+  { name: "file", maxCount: 1 },
+  { name: "payload", maxCount: 1 },
+]);
+
+app.post("/fill", (req, res) => {
+  multipartHandler(req, res, async (err) => {
     try {
-      // --- 1) XLSX-Datei holen ---
-      const fileObj = req.files?.file?.[0];
-      if (!fileObj?.buffer) {
-        return res.status(400).json({ error: "Missing field 'file' (xlsx)." });
+      if (err) {
+        console.error("MULTER_ERROR:", err);
+        return res.status(400).json({
+          ok: false,
+          error: "multipart_parse_error",
+          detail: String(err?.message || err),
+        });
       }
 
-      // --- 2) payload holen (Textfeld oder Datei) ---
+      // Datei finden (template oder file)
+      const templateFile =
+        (req.files?.template && req.files.template[0]) ||
+        (req.files?.file && req.files.file[0]);
+
+      if (!templateFile?.buffer) {
+        console.error("NO_TEMPLATE_FILE. files:", Object.keys(req.files || {}));
+        return res.status(400).json({
+          ok: false,
+          error: "missing_template_file",
+          hint: 'Sende ein Binary-Feld "template" oder "file" (multipart/form-data).',
+          gotFiles: Object.keys(req.files || {}),
+        });
+      }
+
+      // Payload lesen:
+      // 1) bevorzugt Textfeld req.body.payload
+      // 2) alternativ payload als Datei (payload.json)
       let payloadRaw = req.body?.payload;
 
-      if (!payloadRaw) {
-        const payloadFile = req.files?.payload?.[0];
-        if (payloadFile?.buffer) {
-          payloadRaw = payloadFile.buffer.toString("utf8");
-        }
+      if (!payloadRaw && req.files?.payload?.[0]?.buffer) {
+        payloadRaw = req.files.payload[0].buffer.toString("utf8");
       }
 
       if (!payloadRaw) {
-        return res
-          .status(400)
-          .json({ error: "Missing field 'payload' (json string or file)." });
+        console.error("NO_PAYLOAD. body keys:", Object.keys(req.body || {}));
+        return res.status(400).json({
+          ok: false,
+          error: "missing_payload",
+          hint: 'Sende ein Textfeld "payload" (JSON-String) ODER eine Datei "payload" (payload.json).',
+          gotBodyKeys: Object.keys(req.body || {}),
+          gotFiles: Object.keys(req.files || {}),
+        });
       }
 
       let payload;
       try {
         payload = JSON.parse(payloadRaw);
       } catch (e) {
+        console.error("PAYLOAD_JSON_PARSE_FAIL:", e);
         return res.status(400).json({
-          error: "Field 'payload' is not valid JSON.",
-          details: String(e?.message || e),
+          ok: false,
+          error: "payload_not_json",
+          detail: String(e?.message || e),
+          payloadPreview: payloadRaw.slice(0, 300),
         });
       }
 
-      // --- 3) Payload-Defaults ---
       const sheetName = payload.sheetName || "Tabelle1";
-      const cells = payload.cells || {};
-      const positionStartRow = Number(payload.positionStartRow || 15);
-      const positions = Array.isArray(payload.positions) ? payload.positions : [];
-      const columns = payload.columns || {
-        pos: "A",
-        title: "B",
-        desc: "C",
-        qty: "D",
-        dim: "E",
-      };
+      const cells = payload.cells || {}; // { "B5":"...", "F5":"..." }
 
-      // --- 4) Workbook laden ---
+      // Workbook laden
       const workbook = new ExcelJS.Workbook();
-      await workbook.xlsx.load(fileObj.buffer);
+      await workbook.xlsx.load(templateFile.buffer);
 
-      const ws = workbook.getWorksheet(sheetName) || workbook.worksheets[0];
-      if (!ws) {
+      const worksheet = workbook.getWorksheet(sheetName) || workbook.worksheets[0];
+      if (!worksheet) {
         return res.status(400).json({
-          error: "Worksheet not found.",
-          details: `Tried '${sheetName}' and fallback to first sheet.`,
+          ok: false,
+          error: "worksheet_not_found",
+          detail: `Blatt "${sheetName}" nicht gefunden`,
+          availableSheets: workbook.worksheets.map((w) => w.name),
         });
       }
 
-      // --- 5) Fixe Zellen setzen (nur Werte überschreiben) ---
-      for (const [address, value] of Object.entries(cells)) {
-        ws.getCell(address).value = value ?? "";
+      // Zellen setzen
+      for (const [addr, val] of Object.entries(cells)) {
+        worksheet.getCell(addr).value = val ?? "";
       }
 
-      // --- 6) Positionen schreiben (nur diese Spalten) ---
-      for (let i = 0; i < positions.length; i++) {
-        const r = positionStartRow + i;
-        const p = positions[i] || {};
-
-        ws.getCell(`${columns.pos}${r}`).value = p.pos ?? i + 1;
-        ws.getCell(`${columns.title}${r}`).value = p.title ?? "";
-        ws.getCell(`${columns.desc}${r}`).value = p.desc ?? "";
-        ws.getCell(`${columns.qty}${r}`).value = p.qty ?? "";
-        ws.getCell(`${columns.dim}${r}`).value = p.dim ?? "";
+      // Optional: Positionsliste (wenn du sowas sendest)
+      // payload.positions: [{ row: 15, values: { A:"1", B:"...", C:"..." } }, ...]
+      if (Array.isArray(payload.positions)) {
+        for (const pos of payload.positions) {
+          if (!pos?.row || !pos?.values) continue;
+          for (const [col, v] of Object.entries(pos.values)) {
+            worksheet.getCell(`${col}${pos.row}`).value = v ?? "";
+          }
+        }
       }
 
-      // --- 7) XLSX zurückgeben ---
-      const out = await workbook.xlsx.writeBuffer();
+      // zurück als Excel
+      const outBuffer = await workbook.xlsx.writeBuffer();
+
       res.setHeader(
         "Content-Type",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
       );
-      res.setHeader("Content-Disposition", 'attachment; filename="angebot.xlsx"');
-      return res.status(200).send(Buffer.from(out));
-    } catch (err) {
+      res.setHeader("Content-Disposition", 'attachment; filename="filled.xlsx"');
+
+      return res.status(200).send(Buffer.from(outBuffer));
+    } catch (e) {
+      console.error("FILL_ERROR:", e);
       return res.status(500).json({
-        error: "Server error",
-        details: String(err?.message || err),
+        ok: false,
+        error: "internal_error",
+        detail: String(e?.message || e),
       });
     }
-  }
-);
+  });
+});
 
+// Railway/Render nutzen PORT
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`excel-fill-service listening on ${PORT}`));
+app.listen(PORT, () => console.log("Server listening on", PORT));
