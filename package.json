@@ -1,122 +1,18 @@
-const express = require("express");
-const multer = require("multer");
-const ExcelJS = require("exceljs");
-
-const app = express();
-
-// Multer: alles im RAM (keine Files auf Disk nötig)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 25 * 1024 * 1024, // 25 MB
+{
+  "name": "excel-fill-service",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
   },
-});
-
-// Healthcheck
-app.get("/", (req, res) => res.status(200).send("OK excel fill service running"));
-app.get("/health", (req, res) => res.status(200).json({ ok: true }));
-
-/**
- * Erwartet multipart/form-data:
- * - template: Datei .xlsx  (Fieldname: template)
- * - payload:  Datei payload.json ODER Textfeld payload (Fieldname: payload)
- *
- * payload format (Beispiel):
- * {
- *   "sheetName": "Tabelle1",
- *   "cells": { "B5": "Müller GmbH", "F5": "A26101" },
- *   "positionsStartRow": 15,
- *   "positions": [
- *     { "pos": 1, "title": "Spiegel", "desc": "Antikspiegel", "qty": 2, "unit": "Stk" }
- *   ]
- * }
- */
-app.post(
-  "/fill",
-  upload.fields([
-    { name: "template", maxCount: 1 },
-    { name: "payload", maxCount: 1 },
-  ]),
-  async (req, res) => {
-    try {
-      const templateFile = req.files?.template?.[0];
-      if (!templateFile?.buffer) {
-        return res.status(400).json({ error: "Missing template file (field: template)" });
-      }
-
-      // payload: entweder als hochgeladene Datei oder als Textfeld
-      let payloadRaw = null;
-
-      const payloadFile = req.files?.payload?.[0];
-      if (payloadFile?.buffer) {
-        payloadRaw = payloadFile.buffer.toString("utf8");
-      } else if (typeof req.body?.payload === "string") {
-        payloadRaw = req.body.payload;
-      }
-
-      if (!payloadRaw) {
-        return res.status(400).json({
-          error: "Missing payload (upload file field 'payload' or text field 'payload')",
-        });
-      }
-
-      let payload;
-      try {
-        payload = JSON.parse(payloadRaw);
-      } catch (e) {
-        return res.status(400).json({ error: "Payload is not valid JSON", details: String(e) });
-      }
-
-      const workbook = new ExcelJS.Workbook();
-      await workbook.xlsx.load(templateFile.buffer);
-
-      const sheetName = payload.sheetName || "Tabelle1";
-      const ws = workbook.getWorksheet(sheetName) || workbook.worksheets[0];
-      if (!ws) {
-        return res.status(400).json({ error: `Worksheet not found: ${sheetName}` });
-      }
-
-      // Zellen schreiben
-      if (payload.cells && typeof payload.cells === "object") {
-        for (const [addr, val] of Object.entries(payload.cells)) {
-          ws.getCell(addr).value = val ?? "";
-        }
-      }
-
-      // Positionen (optional)
-      const startRow = Number(payload.positionsStartRow || 0);
-      const positions = Array.isArray(payload.positions) ? payload.positions : [];
-
-      if (startRow > 0 && positions.length > 0) {
-        for (let i = 0; i < positions.length; i++) {
-          const r = startRow + i;
-          const p = positions[i] || {};
-          // Spaltenbelegung kannst du an deine Vorlage anpassen:
-          // A: Pos, B: Titel, C: Beschreibung, D: Menge, E: Einheit
-          ws.getCell(`A${r}`).value = p.pos ?? (i + 1);
-          ws.getCell(`B${r}`).value = p.title ?? "";
-          ws.getCell(`C${r}`).value = p.desc ?? "";
-          ws.getCell(`D${r}`).value = p.qty ?? "";
-          ws.getCell(`E${r}`).value = p.unit ?? "";
-        }
-      }
-
-      // zurück als XLSX
-      const outBuffer = await workbook.xlsx.writeBuffer();
-
-      const fileName = payload.outputFileName || "filled.xlsx";
-      res.setHeader(
-        "Content-Type",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      );
-      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-      return res.status(200).send(Buffer.from(outBuffer));
-    } catch (err) {
-      console.error("ERROR /fill:", err);
-      return res.status(500).json({ error: "Internal server error", details: String(err) });
-    }
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "exceljs": "^4.4.0"
   }
-);
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server listening on ${port}`));
+}
+``
