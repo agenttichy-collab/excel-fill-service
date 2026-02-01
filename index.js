@@ -31,10 +31,12 @@ app.get("/", (req, res) => {
  *   "columns": { "pos": "A", "title": "B", "desc": "C", "qty": "D", "dim": "E" }
  * }
  */
-app.post("/fill", upload.single("file"), async (req, res) => {
+app.post("/fill", upload.fields([{ name: "file", maxCount: 1 }, { name: "payload", maxCount: 1 }]), async (req, res) => {
   try {
-    if (!req.file || !req.file.buffer) {
-      return res.status(400).json({ error: "Missing file field 'file' (xlsx)." });
+    const fileObj = req.files?.file?.[0];
+if (!fileObj?.buffer) {
+  return res.status(400).json({ error: "Missing file field 'file' (xlsx)." });
+}
     }
     if (!req.body || !req.body.payload) {
       return res.status(400).json({ error: "Missing field 'payload' (json string)." });
